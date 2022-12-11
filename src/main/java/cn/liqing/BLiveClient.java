@@ -78,7 +78,7 @@ public class BLiveClient extends WebSocketClient {
         }
         if (packet.operation == Operation.SEND_SMS_REPLY) {
             String bodyStr = StandardCharsets.UTF_8.decode(ByteBuffer.wrap(packet.body)).toString();
-            LOGGER.info(bodyStr);
+            //LOGGER.info(bodyStr);
             var json = new Gson().fromJson(bodyStr, JsonObject.class);
             String cmd = json.get("cmd").getAsString();
 
@@ -129,6 +129,8 @@ public class BLiveClient extends WebSocketClient {
                             gift.user.fansMedal = new User.FansMedal();
                             gift.user.fansMedal.name = fansMedal.get("medal_name").getAsString();
                             gift.user.fansMedal.level = fansMedal.get("medal_level").getAsInt();
+                            if (Objects.equals(gift.user.name, ""))
+                                gift.user.fansMedal = null;
                         }
 
                         gift.id = data.get("giftId").getAsInt();
@@ -158,6 +160,8 @@ public class BLiveClient extends WebSocketClient {
                             sc.user.fansMedal = new User.FansMedal();
                             sc.user.fansMedal.name = fansMedal.get("medal_name").getAsString();
                             sc.user.fansMedal.level = fansMedal.get("medal_level").getAsInt();
+                            if (Objects.equals(sc.user.name, ""))
+                                sc.user.fansMedal = null;
                         }
 
                         sc.id = data.get("id").getAsInt();
