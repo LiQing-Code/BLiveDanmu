@@ -129,7 +129,7 @@ public class BLiveClient extends WebSocketClient {
                             gift.user.fansMedal = new User.FansMedal();
                             gift.user.fansMedal.name = fansMedal.get("medal_name").getAsString();
                             gift.user.fansMedal.level = fansMedal.get("medal_level").getAsInt();
-                            if (Objects.equals(gift.user.name, ""))
+                            if (gift.user.name.length() == 0)
                                 gift.user.fansMedal = null;
                         }
 
@@ -160,7 +160,7 @@ public class BLiveClient extends WebSocketClient {
                             sc.user.fansMedal = new User.FansMedal();
                             sc.user.fansMedal.name = fansMedal.get("medal_name").getAsString();
                             sc.user.fansMedal.level = fansMedal.get("medal_level").getAsInt();
-                            if (Objects.equals(sc.user.name, ""))
+                            if (sc.user.name.length() == 0)
                                 sc.user.fansMedal = null;
                         }
 
@@ -204,7 +204,7 @@ public class BLiveClient extends WebSocketClient {
                             interactive.user.fansMedal.name = fansMedal.get("medal_name").getAsString();
                             interactive.user.fansMedal.level = fansMedal.get("medal_level").getAsInt();
                             interactive.user.guardLevel = fansMedal.get("guard_level").getAsShort();
-                            if (Objects.equals(interactive.user.fansMedal.name, ""))
+                            if (interactive.user.fansMedal.name.length() == 0)
                                 interactive.user.fansMedal = null;
                         }
 
