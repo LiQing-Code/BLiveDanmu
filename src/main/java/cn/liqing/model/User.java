@@ -10,7 +10,7 @@ public class User {
     /**
      * 0.无 1.总督 2.提督 3.舰长
      */
-    public short guardLevel;
+    public int guardLevel;
 
     public static class FansMedal {
         public String name;

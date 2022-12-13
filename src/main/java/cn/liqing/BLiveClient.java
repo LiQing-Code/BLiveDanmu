@@ -1,9 +1,8 @@
 package cn.liqing;
 
 import cn.liqing.model.*;
-import com.google.gson.Gson;
-import com.google.gson.JsonArray;
-import com.google.gson.JsonObject;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.java_websocket.client.WebSocketClient;
 import org.java_websocket.handshake.ServerHandshake;
 import org.jetbrains.annotations.NotNull;
@@ -14,103 +13,169 @@ import org.slf4j.LoggerFactory;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.Objects;
 import java.util.Timer;
 import java.util.TimerTask;
 
-public class BLiveClient extends WebSocketClient {
+public abstract class BLiveClient {
     static final Logger LOGGER = LoggerFactory.getLogger(BLiveClient.class);
-
+    public SocketState state;
     public int room;
-    public ArrayList<DanmuHandler> danmuHandlers = new ArrayList<>();
+    final WebSocketClient socket;
 
     public BLiveClient() {
-        super(URI.create("wss://broadcastlv.chat.bilibili.com:2245/sub"));
+        this(URI.create("wss://broadcastlv.chat.bilibili.com:2245/sub"));
     }
 
-    public BLiveClient(int room) {
-        this();
-        this.room = room;
-    }
+    public BLiveClient(URI serverUri) {
+        socket = new WebSocketClient(serverUri) {
+            @Nullable Timer heartbeatTimer;
 
-    public void send(Operation operation, byte[] body) {
-        send(new Packet(operation, body).pack());
-    }
-
-    public void send(Operation operation, Object body) {
-        send(operation, new Gson().toJson(body).getBytes(StandardCharsets.UTF_8));
-    }
-
-    @Nullable Timer heartbeatTimer;
-
-    @SuppressWarnings("all")
-    @Override
-    public void onOpen(ServerHandshake handshakedata) {
-        LOGGER.info("发送认证包，room:{}", room);
-        send(Operation.AUTH, new Auth(room));
-
-        heartbeatTimer = new Timer();
-        heartbeatTimer.schedule(new TimerTask() {
             @Override
-            public void run() {
-                LOGGER.info("发送心跳包，room:{}", room);
-                send(Operation.HEARTBEAT, new byte[0]);
+            public void onOpen(ServerHandshake handshakedata) {
+                BLiveClient.this.onOpen(handshakedata);
+                //设置socket状态为已连接
+                state = SocketState.CONNECTED;
+
+                //发送认证包
+                byte[] body;
+                try {
+                    body = new ObjectMapper().writeValueAsBytes(new Auth(room));
+                } catch (JsonProcessingException e) {
+                    throw new RuntimeException("序列化Auth对象失败", e);
+                }
+                send(new Packet(Operation.AUTH, body).pack());
+
+                //设置一个定时器每隔20秒发送一次心跳包
+                heartbeatTimer = new Timer();
+                heartbeatTimer.schedule(new TimerTask() {
+                    @Override
+                    public void run() {
+                        //发送心跳包
+                        send(new Packet(Operation.HEARTBEAT, new byte[0]).pack());
+                    }
+                }, 0, 20 * 1000);
             }
-        }, 0, 20 * 1000);
-        danmuHandlers.stream().anyMatch(handler -> handler.onOpen());
+
+            @Override
+            public void onMessage(ByteBuffer bytes) {
+                var packets = Packet.unPack(bytes);
+                packets.forEach(packet -> onPacket(packet));
+            }
+
+            @Override
+            public void onMessage(String message) {
+            }
+
+            @Override
+            public void onClose(int code, String reason, boolean remote) {
+                state = SocketState.CLOSED;
+                BLiveClient.this.onClose(code, reason, remote);
+            }
+
+            @Override
+            public void onClosing(int code, String reason, boolean remote) {
+                state = SocketState.CLOSING;
+            }
+
+            @Override
+            public void onError(Exception ex) {
+                BLiveClient.this.onError(ex);
+            }
+        };
     }
 
-    @SuppressWarnings("all")
-    @Override
-    public void onClose(int code, String reason, boolean remote) {
-        if (heartbeatTimer != null) {
-            heartbeatTimer.cancel();
-            heartbeatTimer = null;
+
+    /**
+     * 连接到直播间
+     * 非阻塞方法,不会等待连接结果,如果已经连接会重新连接
+     *
+     * @param room 直播间号
+     * @return 如果当前正在连接或者关闭返回 false 其他情况返回 true
+     */
+    public boolean connect(int room) {
+        //如果正在连接或者关闭直接返回 false
+        if (state == SocketState.CONNECTING || state == SocketState.CLOSING)
+            return false;
+        //设置socket状态为连接中
+        state = SocketState.CONNECTING;
+        //设置直播间号
+        this.room = room;
+        //如果已经连接或断开就重新连接，否则正常连接
+        if (socket.isOpen() || socket.isClosed()) {
+            socket.reconnect();
+        } else {
+            socket.connect();
         }
-        danmuHandlers.stream().anyMatch(handler -> handler.onClose(code, reason, remote));
+        return true;
+    }
+
+    /**
+     * 关闭连接
+     * 非阻塞方法，不会等待关闭结果
+     *
+     * @return 如果正在关闭中，返回 false 否则返回 true
+     */
+    public boolean close() {
+        if (state == SocketState.CLOSING)
+            return false;
+        //设置socket状态为关闭中
+        state = SocketState.CLOSING;
+        socket.close();
+        return true;
     }
 
     public void onPacket(@NotNull Packet packet) {
-        for (var handler : danmuHandlers) {
-            if (handler.onPacket(packet))
-                break;
-        }
         if (packet.operation == Operation.SEND_SMS_REPLY) {
-            String bodyStr = StandardCharsets.UTF_8.decode(ByteBuffer.wrap(packet.body)).toString();
-            //LOGGER.info(bodyStr);
-            var json = new Gson().fromJson(bodyStr, JsonObject.class);
-            String cmd = json.get("cmd").getAsString();
+            String bodyStr = new String(packet.body, StandardCharsets.UTF_8);
+            LOGGER.debug(bodyStr);
 
-            switch (cmd) {
+            Message msg;
+            try {
+                msg = new ObjectMapper().readValue(bodyStr, Message.class);
+                if (msg.cmd == null) {
+                    LOGGER.warn("消息包中没有cmd");
+                    return;
+                }
+            } catch (Exception ex) {
+                LOGGER.error("解析选项出错", ex);
+                return;
+            }
+
+            switch (msg.cmd) {
                 case "DANMU_MSG" -> {
                     try {
-                        JsonArray info = json.get("info").getAsJsonArray();
+                        var info = msg.info;
+                        if (info == null) {
+                            LOGGER.warn("弹幕包中没有info");
+                            return;
+                        }
+                        //解析用户
                         var danmu = new Danmu();
-                        danmu.user.uid = info.get(2).getAsJsonArray().get(0).getAsInt();
-                        danmu.user.name = info.get(2).getAsJsonArray().get(1).getAsString();
-                        danmu.user.guardLevel = info.get(7).getAsShort();
+                        danmu.user.uid = info.at("/2/0").asInt();
+                        danmu.user.name = info.at("2/1").asText();
+                        danmu.user.guardLevel = info.get(7).asInt();
 
-                        var fansMedal = info.get(3).getAsJsonArray();
+                        //解析粉丝团
+                        var fansMedal = info.get(3);
                         if (fansMedal != null && fansMedal.size() >= 2) {
                             danmu.user.fansMedal = new User.FansMedal();
-                            danmu.user.fansMedal.level = info.get(3).getAsJsonArray().get(0).getAsInt();
-                            danmu.user.fansMedal.name = info.get(3).getAsJsonArray().get(1).getAsString();
+                            danmu.user.fansMedal.level = fansMedal.get(0).asInt();
+                            danmu.user.fansMedal.name = fansMedal.get(1).asText();
                         }
 
-                        danmu.body = info.get(1).getAsString();
-                        int isEmoji = info.get(0).getAsJsonArray().get(12).getAsInt();
+                        //解析内容
+                        danmu.body = info.get(1).asText();
+                        //判断是弹幕消息还是表情消息
+                        int isEmoji = info.at("/0/12").asInt();
                         if (isEmoji == 1) {
                             var emoji = new Emoji();
                             emoji.user = danmu.user;
                             emoji.body = danmu.body;
-                            emoji.uri = info.get(0).getAsJsonArray().get(13)
-                                    .getAsJsonObject().get("url").getAsString();
-                            boolean ignore = danmuHandlers.stream()
-                                    .anyMatch(danmuHandler -> danmuHandler.onEmoji(emoji));
+                            emoji.uri = info.at("/0/13/url").asText();
+                            onEmoji(emoji);
                         } else {
-                            boolean ignore = danmuHandlers.stream()
-                                    .anyMatch(danmuHandler -> danmuHandler.onDanmu(danmu));
+                            onDanmu(danmu);
                         }
                     } catch (RuntimeException ex) {
                         LOGGER.error("解析弹幕包出错", ex);
@@ -118,119 +183,150 @@ public class BLiveClient extends WebSocketClient {
                 }
                 case "SEND_GIFT" -> {
                     try {
-                        JsonObject data = json.get("data").getAsJsonObject();
+                        var data = msg.data;
+                        if (data == null) {
+                            LOGGER.warn("礼物包中没有data");
+                            return;
+                        }
                         var gift = new Gift();
-                        gift.user.uid = data.get("uid").getAsInt();
-                        gift.user.name = data.get("uname").getAsString();
-                        gift.user.guardLevel = data.get("guard_level").getAsShort();
+                        gift.user.uid = data.get("uid").asInt();
+                        gift.user.name = data.get("uname").asText();
+                        gift.user.guardLevel = data.get("guard_level").asInt();
 
-                        var fansMedal = data.get("medal_info").getAsJsonObject();
-                        if (fansMedal != null) {
+                        var fansMedal = data.get("medal_info");
+                        if (fansMedal != null && !fansMedal.isNull()) {
                             gift.user.fansMedal = new User.FansMedal();
-                            gift.user.fansMedal.name = fansMedal.get("medal_name").getAsString();
-                            gift.user.fansMedal.level = fansMedal.get("medal_level").getAsInt();
+                            gift.user.fansMedal.name = fansMedal.get("medal_name").asText();
+                            gift.user.fansMedal.level = fansMedal.get("medal_level").asInt();
                             if (gift.user.name.length() == 0)
                                 gift.user.fansMedal = null;
                         }
 
-                        gift.id = data.get("giftId").getAsInt();
-                        gift.name = data.get("giftName").getAsString();
-                        if (Objects.equals(data.get("coin_type").getAsString(), "gold"))
-                            gift.price = data.get("total_coin").getAsFloat() / 1000;
+                        gift.id = data.get("giftId").asInt();
+                        gift.name = data.get("giftName").asText();
+                        if (Objects.equals(data.get("coin_type").asText(), "gold"))
+                            gift.price = data.get("total_coin").asInt() / 1000f;
                         else
                             gift.price = 0;
-                        gift.num = data.get("num").getAsInt();
-                        boolean ignore = danmuHandlers.stream().anyMatch(danmuHandler -> danmuHandler.onGift(gift));
+                        gift.num = data.get("num").asInt();
+                        onGift(gift);
                     } catch (RuntimeException ex) {
                         LOGGER.error("解析礼物包出错", ex);
                     }
                 }
                 case "SUPER_CHAT_MESSAGE" -> {
                     try {
-                        JsonObject data = json.get("data").getAsJsonObject();
+                        var data = msg.data;
+                        if (data == null) {
+                            LOGGER.warn("醒目留言包中没有data");
+                            return;
+                        }
                         var sc = new SuperChat();
-                        sc.user.uid = data.get("uid").getAsInt();
-                        sc.user.name = data.get("user_info").getAsJsonObject()
-                                .get("uname").getAsString();
-                        sc.user.guardLevel = data.get("user_info").getAsJsonObject()
-                                .get("guard_level").getAsShort();
+                        sc.user.uid = data.get("uid").asInt();
+                        sc.user.name = data.at("user_info/uname").asText();
+                        sc.user.guardLevel = data.at("user_info/guard_level").asInt();
 
-                        var fansMedal = data.get("medal_info").getAsJsonObject();
-                        if (fansMedal != null) {
+                        var fansMedal = data.get("medal_info");
+                        if (fansMedal != null && !fansMedal.isNull()) {
                             sc.user.fansMedal = new User.FansMedal();
-                            sc.user.fansMedal.name = fansMedal.get("medal_name").getAsString();
-                            sc.user.fansMedal.level = fansMedal.get("medal_level").getAsInt();
+                            sc.user.fansMedal.name = fansMedal.get("medal_name").asText();
+                            sc.user.fansMedal.level = fansMedal.get("medal_level").asInt();
                             if (sc.user.name.length() == 0)
                                 sc.user.fansMedal = null;
                         }
 
-                        sc.id = data.get("id").getAsInt();
-                        sc.body = data.get("message").getAsString();
-                        sc.price = data.get("price").getAsInt();
-                        sc.time = data.get("time").getAsInt();
-                        boolean ignore = danmuHandlers.stream().anyMatch(danmuHandler -> danmuHandler.onSuperChat(sc));
+                        sc.id = data.get("id").asInt();
+                        sc.body = data.get("message").asText();
+                        sc.price = data.get("price").asInt();
+                        sc.time = data.get("time").asInt();
+                        onSuperChat(sc);
                     } catch (RuntimeException ex) {
                         LOGGER.error("解析醒目留言包出错", ex);
                     }
                 }
                 case "USER_TOAST_MSG" -> {
                     try {
-                        JsonObject data = json.get("data").getAsJsonObject();
+                        var data = msg.data;
+                        if (data == null) {
+                            LOGGER.warn("舰长包中没有data");
+                            return;
+                        }
                         var guard = new Guard();
-                        guard.user.uid = data.get("uid").getAsInt();
-                        guard.user.name = data.get("uname").getAsString();
-                        guard.user.guardLevel = data.get("guard_level").getAsShort();
-                        guard.id = data.get("gift_id").getAsInt();
-                        guard.name = data.get("role_name").getAsString();
-                        guard.price = data.get("price").getAsFloat() / 1000;
-                        guard.num = data.get("num").getAsInt();
+                        guard.user.uid = data.get("uid").asInt();
+                        guard.user.name = data.get("username").asText();
+                        guard.user.guardLevel = data.get("guard_level").asInt();
+                        guard.id = data.get("gift_id").asInt();
+                        guard.name = data.get("role_name").asText();
+                        guard.price = data.get("price").asInt() / 1000f;
+                        guard.num = data.get("num").asInt();
                         guard.level = guard.user.guardLevel;
-                        guard.unit = data.get("unit").getAsString();
-                        boolean ignore = danmuHandlers.stream().anyMatch(danmuHandler -> danmuHandler.onGuard(guard));
+                        guard.unit = data.get("unit").asText();
+                        onGuard(guard);
                     } catch (RuntimeException ex) {
                         LOGGER.error("解析舰长包出错", ex);
                     }
                 }
                 case "INTERACT_WORD" -> {
                     try {
-                        JsonObject data = json.get("data").getAsJsonObject();
+                        var data = msg.data;
+                        if (data == null) {
+                            LOGGER.warn("互动包中没有data");
+                            return;
+                        }
                         var interactive = new Interactive();
-                        interactive.user.uid = data.get("uid").getAsInt();
-                        interactive.user.name = data.get("uname").getAsString();
+                        interactive.user.uid = data.get("uid").asInt();
+                        interactive.user.name = data.get("uname").asText();
 
-                        var fansMedal = data.get("fans_medal").getAsJsonObject();
-                        if (fansMedal != null) {
+                        var fansMedal = data.get("fans_medal");
+                        if (fansMedal != null && !fansMedal.isNull()) {
                             interactive.user.fansMedal = new User.FansMedal();
-                            interactive.user.fansMedal.name = fansMedal.get("medal_name").getAsString();
-                            interactive.user.fansMedal.level = fansMedal.get("medal_level").getAsInt();
-                            interactive.user.guardLevel = fansMedal.get("guard_level").getAsShort();
+                            interactive.user.fansMedal.name = fansMedal.get("medal_name").asText();
+                            interactive.user.fansMedal.level = fansMedal.get("medal_level").asInt();
+                            interactive.user.guardLevel = fansMedal.get("guard_level").asInt();
                             if (interactive.user.fansMedal.name.length() == 0)
                                 interactive.user.fansMedal = null;
                         }
 
-                        interactive.type = data.get("msg_type").getAsInt();
-                        boolean ignore = danmuHandlers.stream().anyMatch(danmuHandler -> danmuHandler.onInteractive(interactive));
+                        interactive.type = data.get("msg_type").asInt();
+                        onInteractive(interactive);
                     } catch (RuntimeException ex) {
                         LOGGER.error("解析互动包出错", ex);
                     }
                 }
             }
-
         }
+
     }
 
-    @Override
-    public void onMessage(ByteBuffer bytes) {
-        Packet.unPack(bytes).forEach(this::onPacket);
+    @SuppressWarnings("unused")
+    public void onDanmu(Danmu danmu) {
     }
 
-    @Override
-    public void onMessage(String message) {
+    @SuppressWarnings("unused")
+    public void onEmoji(Emoji emoji) {
     }
 
-    @SuppressWarnings("all")
-    @Override
-    public void onError(Exception ex) {
-        danmuHandlers.stream().anyMatch(handler -> handler.onError(ex));
+    @SuppressWarnings("unused")
+    public void onGift(Gift gift) {
     }
+
+    @SuppressWarnings("unused")
+    public void onGuard(Guard guard) {
+    }
+
+    @SuppressWarnings("unused")
+    public void onInteractive(Interactive interactive) {
+    }
+
+    @SuppressWarnings("unused")
+    public void onSuperChat(SuperChat superChat) {
+    }
+
+    public void onOpen(ServerHandshake handshakedata) {
+    }
+
+    public void onClose(int code, String reason, boolean remote) {
+    }
+
+    public abstract void onError(Exception ex);
 }
