@@ -12,7 +12,7 @@ class BLiveClientTest {
     void connect() throws InterruptedException {
         BLiveClient client = new BLiveClient() {
             @Override
-            public void onOpen(ServerHandshake handshakedata) {
+            public void onOpen() {
                 System.out.println("已连接");
             }
 

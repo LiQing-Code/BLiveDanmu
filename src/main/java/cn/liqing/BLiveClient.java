@@ -33,7 +33,7 @@ public abstract class BLiveClient {
 
             @Override
             public void onOpen(ServerHandshake handshakedata) {
-                BLiveClient.this.onOpen(handshakedata);
+                BLiveClient.this.onOpen();
                 //设置socket状态为已连接
                 state = SocketState.CONNECTED;
 
@@ -322,7 +322,7 @@ public abstract class BLiveClient {
     public void onSuperChat(SuperChat superChat) {
     }
 
-    public void onOpen(ServerHandshake handshakedata) {
+    public void onOpen() {
     }
 
     public void onClose(int code, String reason, boolean remote) {

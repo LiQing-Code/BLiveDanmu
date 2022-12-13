@@ -11,7 +11,7 @@ repositories {
 
 dependencies {
     implementation 'org.jetbrains:annotations:23.0.0'
-    api 'org.java-websocket:Java-WebSocket:1.5.3'
+    implementation 'org.java-websocket:Java-WebSocket:1.5.3'
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.14.0'
     testImplementation 'org.junit.jupiter:junit-jupiter-api:5.9.0'
     testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.9.0'
