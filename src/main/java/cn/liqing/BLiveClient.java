@@ -19,23 +19,27 @@ import java.util.TimerTask;
 
 public abstract class BLiveClient {
     static final Logger LOGGER = LoggerFactory.getLogger(BLiveClient.class);
-    public SocketState state;
     public int room;
-    final WebSocketClient socket;
+    WebSocketClient socket;
+    URI serverUri;
 
     public BLiveClient() {
         this(URI.create("wss://broadcastlv.chat.bilibili.com:2245/sub"));
     }
 
     public BLiveClient(URI serverUri) {
-        socket = new WebSocketClient(serverUri) {
+        this.serverUri = serverUri;
+        socket = createSocket();
+    }
+
+    WebSocketClient createSocket() {
+        return new WebSocketClient(serverUri) {
             @Nullable Timer heartbeatTimer;
 
             @Override
             public void onOpen(ServerHandshake handshakedata) {
+                isConnecting = false;
                 BLiveClient.this.onOpen();
-                //设置socket状态为已连接
-                state = SocketState.CONNECTED;
 
                 //发送认证包
                 byte[] body;
@@ -51,8 +55,9 @@ public abstract class BLiveClient {
                 heartbeatTimer.schedule(new TimerTask() {
                     @Override
                     public void run() {
-                        //发送心跳包
-                        send(new Packet(Operation.HEARTBEAT, new byte[0]).pack());
+                        if (isOpen())
+                            //发送心跳包
+                            send(new Packet(Operation.HEARTBEAT, new byte[0]).pack());
                     }
                 }, 0, 20 * 1000);
             }
@@ -69,13 +74,12 @@ public abstract class BLiveClient {
 
             @Override
             public void onClose(int code, String reason, boolean remote) {
-                state = SocketState.CLOSED;
+                isConnecting = false;
+                if (heartbeatTimer != null) {
+                    heartbeatTimer.cancel();
+                    heartbeatTimer = null;
+                }
                 BLiveClient.this.onClose(code, reason, remote);
-            }
-
-            @Override
-            public void onClosing(int code, String reason, boolean remote) {
-                state = SocketState.CLOSING;
             }
 
             @Override
@@ -85,28 +89,27 @@ public abstract class BLiveClient {
         };
     }
 
+    boolean isConnecting = false;
 
     /**
      * 连接到直播间
-     * 非阻塞方法,不会等待连接结果,如果已经连接会重新连接
+     * 非阻塞方法,不会等待连接结果
      *
      * @param room 直播间号
-     * @return 如果当前正在连接或者关闭返回 false 其他情况返回 true
+     * @return 如果当前正在连接或已经连接返回 false 其他情况返回 true
      */
     public boolean connect(int room) {
-        //如果正在连接或者关闭直接返回 false
-        if (state == SocketState.CONNECTING || state == SocketState.CLOSING)
+        if (isConnecting || socket.isOpen() || socket.isClosing()) {
             return false;
-        //设置socket状态为连接中
-        state = SocketState.CONNECTING;
+        }
+        isConnecting = true;
         //设置直播间号
         this.room = room;
         //如果已经连接或断开就重新连接，否则正常连接
-        if (socket.isOpen() || socket.isClosed()) {
-            socket.reconnect();
-        } else {
-            socket.connect();
+        if (socket.isClosed()) {
+            socket = createSocket();
         }
+        socket.connect();
         return true;
     }
 
@@ -117,12 +120,24 @@ public abstract class BLiveClient {
      * @return 如果正在关闭中，返回 false 否则返回 true
      */
     public boolean close() {
-        if (state == SocketState.CLOSING)
+        if (socket.isClosing() || socket.isClosed())
             return false;
-        //设置socket状态为关闭中
-        state = SocketState.CLOSING;
         socket.close();
         return true;
+    }
+
+    /**
+     * 1.已连接 2.已断开 3.连接中 4.其他
+     */
+    public int state() {
+        if (socket.isOpen())
+            return 1;
+        else if (socket.isClosed())
+            return 2;
+        else if (isConnecting)
+            return 3;
+        else
+            return 4;
     }
 
     public void onPacket(@NotNull Packet packet) {
@@ -134,12 +149,10 @@ public abstract class BLiveClient {
             try {
                 msg = new ObjectMapper().readValue(bodyStr, Message.class);
                 if (msg.cmd == null) {
-                    LOGGER.warn("消息包中没有cmd");
-                    return;
+                    throw new RuntimeException("消息包中没有cmd");
                 }
             } catch (Exception ex) {
-                LOGGER.error("解析选项出错", ex);
-                return;
+                throw new RuntimeException("解析消息出错", ex);
             }
 
             switch (msg.cmd) {
@@ -153,7 +166,7 @@ public abstract class BLiveClient {
                         //解析用户
                         var danmu = new Danmu();
                         danmu.user.uid = info.at("/2/0").asInt();
-                        danmu.user.name = info.at("2/1").asText();
+                        danmu.user.name = info.at("/2/1").asText();
                         danmu.user.guardLevel = info.get(7).asInt();
 
                         //解析粉丝团
@@ -178,7 +191,7 @@ public abstract class BLiveClient {
                             onDanmu(danmu);
                         }
                     } catch (RuntimeException ex) {
-                        LOGGER.error("解析弹幕包出错", ex);
+                        throw new RuntimeException("解析弹幕包出错", ex);
                     }
                 }
                 case "SEND_GIFT" -> {
@@ -211,7 +224,7 @@ public abstract class BLiveClient {
                         gift.num = data.get("num").asInt();
                         onGift(gift);
                     } catch (RuntimeException ex) {
-                        LOGGER.error("解析礼物包出错", ex);
+                        throw new RuntimeException("解析礼物包出错", ex);
                     }
                 }
                 case "SUPER_CHAT_MESSAGE" -> {
@@ -223,8 +236,8 @@ public abstract class BLiveClient {
                         }
                         var sc = new SuperChat();
                         sc.user.uid = data.get("uid").asInt();
-                        sc.user.name = data.at("user_info/uname").asText();
-                        sc.user.guardLevel = data.at("user_info/guard_level").asInt();
+                        sc.user.name = data.at("/user_info/uname").asText();
+                        sc.user.guardLevel = data.at("/user_info/guard_level").asInt();
 
                         var fansMedal = data.get("medal_info");
                         if (fansMedal != null && !fansMedal.isNull()) {
@@ -241,16 +254,14 @@ public abstract class BLiveClient {
                         sc.time = data.get("time").asInt();
                         onSuperChat(sc);
                     } catch (RuntimeException ex) {
-                        LOGGER.error("解析醒目留言包出错", ex);
+                        throw new RuntimeException("解析醒目留言包出错", ex);
                     }
                 }
                 case "USER_TOAST_MSG" -> {
                     try {
                         var data = msg.data;
-                        if (data == null) {
-                            LOGGER.warn("舰长包中没有data");
-                            return;
-                        }
+                        if (data == null)
+                            throw new RuntimeException("舰长包中没有data");
                         var guard = new Guard();
                         guard.user.uid = data.get("uid").asInt();
                         guard.user.name = data.get("username").asText();
@@ -263,7 +274,7 @@ public abstract class BLiveClient {
                         guard.unit = data.get("unit").asText();
                         onGuard(guard);
                     } catch (RuntimeException ex) {
-                        LOGGER.error("解析舰长包出错", ex);
+                        throw new RuntimeException("解析舰长包出错", ex);
                     }
                 }
                 case "INTERACT_WORD" -> {
@@ -290,7 +301,7 @@ public abstract class BLiveClient {
                         interactive.type = data.get("msg_type").asInt();
                         onInteractive(interactive);
                     } catch (RuntimeException ex) {
-                        LOGGER.error("解析互动包出错", ex);
+                        throw new RuntimeException("解析互动包出错", ex);
                     }
                 }
             }

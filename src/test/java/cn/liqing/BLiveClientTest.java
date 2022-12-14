@@ -1,9 +1,15 @@
 package cn.liqing;
 
+import cn.liqing.model.Operation;
 import cn.liqing.model.Packet;
-import org.java_websocket.handshake.ServerHandshake;
+import cn.liqing.model.SuperChat;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jetbrains.annotations.NotNull;
+import org.junit.jupiter.api.Test;
 
+import java.io.File;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 
 class BLiveClientTest {
@@ -36,5 +42,27 @@ class BLiveClientTest {
 
         while (true)
             Thread.sleep(100);
+    }
+
+    @Test
+    void onPacket() throws IOException {
+        BLiveClient client = new BLiveClient() {
+
+            @Override
+            public void onSuperChat(SuperChat superChat) {
+
+            }
+
+            @Override
+            public void onError(Exception ex) {
+                ex.printStackTrace();
+            }
+        };
+        File file = new File("src/test/resources/test.json");
+        var json = new ObjectMapper().readValue(file, JsonNode.class);
+        for (int i = 0; i < json.size() - 1; i++) {
+            var body = json.get(i).toString().getBytes(StandardCharsets.UTF_8);
+            client.onPacket(new Packet(Operation.SEND_SMS_REPLY, body));
+        }
     }
 }
