@@ -3,7 +3,7 @@ package cn.liqing.model;
 import org.jetbrains.annotations.Nullable;
 
 public class User {
-    public int uid;
+    public long uid;
     public String name;
     public @Nullable FansMedal fansMedal;
 
