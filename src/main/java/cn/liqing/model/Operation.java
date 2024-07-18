@@ -27,7 +27,7 @@ public enum Operation {
         this.code = code;
     }
 
-    static Operation parse(int code) {
+    public static Operation parse(int code) {
         return switch (code) {
             case 2 -> Operation.HEARTBEAT;
             case 3 -> Operation.HEARTBEAT_REPLY;

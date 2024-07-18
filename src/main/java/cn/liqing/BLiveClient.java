@@ -19,9 +19,9 @@ import java.util.TimerTask;
 
 public abstract class BLiveClient {
     static final Logger LOGGER = LoggerFactory.getLogger(BLiveClient.class);
-    public int room;
     WebSocketClient socket;
-    URI serverUri;
+    final URI serverUri;
+    private Auth auth;
 
     public BLiveClient() {
         this(URI.create("wss://broadcastlv.chat.bilibili.com:2245/sub"));
@@ -44,7 +44,7 @@ public abstract class BLiveClient {
                 //发送认证包
                 byte[] body;
                 try {
-                    body = new ObjectMapper().writeValueAsBytes(new Auth(room));
+                    body = new ObjectMapper().writeValueAsBytes(auth);
                 } catch (JsonProcessingException e) {
                     throw new RuntimeException("序列化Auth对象失败", e);
                 }
@@ -59,7 +59,7 @@ public abstract class BLiveClient {
                             //发送心跳包
                             send(new Packet(Operation.HEARTBEAT, new byte[0]).pack());
                     }
-                }, 0, 20 * 1000);
+                }, 5000, 30 * 1000);
             }
 
             @Override
@@ -95,22 +95,20 @@ public abstract class BLiveClient {
      * 连接到直播间
      * 非阻塞方法,不会等待连接结果
      *
-     * @param room 直播间号
-     * @return 如果当前正在连接或已经连接返回 false 其他情况返回 true
+     * @param auth 认证信息
      */
-    public boolean connect(int room) {
+    public void connect(Auth auth) {
+        this.auth = auth;
         if (isConnecting || socket.isOpen() || socket.isClosing()) {
-            return false;
+            return;
         }
         isConnecting = true;
         //设置直播间号
-        this.room = room;
         //如果已经连接或断开就重新连接，否则正常连接
         if (socket.isClosed()) {
             socket = createSocket();
         }
         socket.connect();
-        return true;
     }
 
     /**
@@ -211,7 +209,7 @@ public abstract class BLiveClient {
                             gift.user.fansMedal = new User.FansMedal();
                             gift.user.fansMedal.name = fansMedal.get("medal_name").asText();
                             gift.user.fansMedal.level = fansMedal.get("medal_level").asInt();
-                            if (gift.user.name.length() == 0)
+                            if (gift.user.name.isEmpty())
                                 gift.user.fansMedal = null;
                         }
 
@@ -244,7 +242,7 @@ public abstract class BLiveClient {
                             sc.user.fansMedal = new User.FansMedal();
                             sc.user.fansMedal.name = fansMedal.get("medal_name").asText();
                             sc.user.fansMedal.level = fansMedal.get("medal_level").asInt();
-                            if (sc.user.name.length() == 0)
+                            if (sc.user.name.isEmpty())
                                 sc.user.fansMedal = null;
                         }
 
@@ -294,7 +292,7 @@ public abstract class BLiveClient {
                             interactive.user.fansMedal.name = fansMedal.get("medal_name").asText();
                             interactive.user.fansMedal.level = fansMedal.get("medal_level").asInt();
                             interactive.user.guardLevel = fansMedal.get("guard_level").asInt();
-                            if (interactive.user.fansMedal.name.length() == 0)
+                            if (interactive.user.fansMedal.name.isEmpty())
                                 interactive.user.fansMedal = null;
                         }
 
